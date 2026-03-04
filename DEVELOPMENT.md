@@ -136,7 +136,14 @@ npm install && npm run build  # if applicable
 Plugin load order in `packages` array:
 1. `npm:package-name` — stable npm installs, updated by `pi ext update`
 2. Absolute paths (`/home/jake/pi-plugins/...`) — local forks, built locally
-3. GitHub URLs — avoid; prefer local clones instead
+3. GitHub URLs — avoid for day-to-day dev; prefer local clones while iterating
+
+### Current status bar setup
+
+- `pi-powerbar` has been removed from active packages (redundant).
+- `pi-powerline-footer` now includes subscription windows itself via bundled `@marckrenn/pi-sub-core`.
+- Active source is the fork URL: `https://github.com/LNKB82REZ2GE4/pi-powerline-footer`
+- For local iteration on that extension, temporarily switch back to `/home/jake/pi-plugins/pi-powerline-footer`.
 
 ## Adding a New Plugin Fork
 

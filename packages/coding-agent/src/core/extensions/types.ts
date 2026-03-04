@@ -1067,6 +1067,9 @@ export interface ExtensionAPI {
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
 
+	/** Get scoped models configured for cycling (e.g. via --models or /scoped-models). */
+	getScopedModels(): ReadonlyArray<{ model: Model<any>; thinkingLevel: ThinkingLevel }>;
+
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
@@ -1267,6 +1270,8 @@ export type GetThinkingLevelHandler = () => ThinkingLevel;
 
 export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
+export type GetScopedModelsHandler = () => ReadonlyArray<{ model: Model<any>; thinkingLevel: ThinkingLevel }>;
+
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
 /**
@@ -1306,6 +1311,7 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	getScopedModels: GetScopedModelsHandler;
 }
 
 /**

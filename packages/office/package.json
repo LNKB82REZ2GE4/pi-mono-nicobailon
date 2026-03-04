@@ -1,0 +1,45 @@
+{
+  "name": "@lnkb82rez2ge4/pi-the-office",
+  "version": "0.0.1",
+  "description": "The Office for pi - hierarchical specialist teams with auditable orchestration",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "agents"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "keywords": [
+    "pi",
+    "agent",
+    "orchestration",
+    "multi-agent",
+    "office"
+  ],
+  "author": "LNKB82REZ2GE4",
+  "license": "MIT",
+  "dependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

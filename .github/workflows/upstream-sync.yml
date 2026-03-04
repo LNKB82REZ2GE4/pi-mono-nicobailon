@@ -87,6 +87,8 @@ jobs:
           BEHIND=${{ steps.check.outputs.behind }}
           
           gh pr create \
+            --base main \
+            --head upstream-sync \
             --title "🔄 Sync upstream: $BEHIND new commit(s)" \
             --body "$(cat <<'EOF'
           ## Upstream Sync
