@@ -83,17 +83,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMITS=$(git log --oneline main..upstream/main | head -20)
+          COMMITS=$(git log --oneline main..upstream/main | head -20 || true)
           BEHIND=${{ steps.check.outputs.behind }}
 
-          BODY=$(cat <<EOF
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" <<'EOF'
           ## Upstream Sync
 
           This PR brings in the latest changes from [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
 
-          ### New Commits ($BEHIND total)
-          ```
-          $COMMITS
+          ### New Commits (__BEHIND__ total)
+          ```text
+          __COMMITS__
           ```
 
           ---
@@ -106,26 +107,30 @@ jobs:
 
           _This PR was automatically created by the [Upstream Sync](/.github/workflows/upstream-sync.yml) workflow._
           EOF
-          )
 
-          PR_JSON=$(gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/pulls" \
-            -f title="🔄 Sync upstream: $BEHIND new commit(s)" \
-            -f head="upstream-sync" \
-            -f base="main" \
-            -f body="$BODY")
+          BODY_FILE="$BODY_FILE" COMMITS="$COMMITS" BEHIND="$BEHIND" python - <<'PY'
+          import os
+          from pathlib import Path
 
-          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
-          PR_URL=$(echo "$PR_JSON" | jq -r '.html_url')
+          path = Path(os.environ["BODY_FILE"])
+          body = path.read_text()
+          body = body.replace("__BEHIND__", os.environ["BEHIND"])
+          body = body.replace("__COMMITS__", os.environ["COMMITS"])
+          path.write_text(body)
+          PY
+
+          PR_URL=$(gh pr create \
+            --title "🔄 Sync upstream: $BEHIND new commit(s)" \
+            --head "upstream-sync" \
+            --base "main" \
+            --body-file "$BODY_FILE")
+          PR_NUMBER=${PR_URL##*/}
 
           echo "### 🔁 Created PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
 
           if gh api "repos/${GITHUB_REPOSITORY}/labels/upstream-sync" >/dev/null 2>&1; then
-            gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/issues/$PR_NUMBER/labels" \
-              -f labels[]="upstream-sync" >/dev/null
+            gh pr edit "$PR_NUMBER" --add-label "upstream-sync" >/dev/null
           fi
+
+          rm -f "$BODY_FILE"
