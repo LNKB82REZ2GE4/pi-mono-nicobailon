@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus MCP
 
-This project is indexed by GitNexus as **pi-mono** (5582 symbols, 16406 relationships, 300 execution flows).
+This project is indexed by GitNexus as **pi-mono** (5586 symbols, 16437 relationships, 300 execution flows).
 
 GitNexus provides a knowledge graph over this codebase — call chains, blast radius, execution flows, and semantic search.
 

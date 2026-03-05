@@ -2,3 +2,12 @@
 {"ts":"2026-02-27T15:34:11.705Z","agent":"LoudPhoenix","type":"leave"}
 {"ts":"2026-03-03T16:35:20.335Z","type":"leave","agent":"JadeUnion","preview":"Lobby worker exited (code unknown)"}
 {"ts":"2026-03-03T16:51:54.685Z","type":"leave","agent":"NiceIce"}
+{"ts":"2026-03-04T10:23:57.894Z","type":"edit","agent":"LoudEagle","target":"/home/jake/.pi/agent/pi-messenger.json"}
+{"ts":"2026-03-04T10:24:08.087Z","type":"edit","agent":"LoudEagle","target":"/home/jake/.pi/agent/extensions/pi-messenger/crew/agents/crew-worker.md"}
+{"ts":"2026-03-04T10:24:16.358Z","type":"edit","agent":"LoudEagle","target":"/home/jake/.pi/agent/extensions/pi-messenger/crew/agents/crew-planner.md"}
+{"ts":"2026-03-04T10:24:21.519Z","type":"edit","agent":"LoudEagle","target":"/home/jake/.pi/agent/extensions/pi-messenger/crew/agents/crew-reviewer.md"}
+{"ts":"2026-03-04T10:24:27.055Z","type":"edit","agent":"LoudEagle","target":"/home/jake/.pi/agent/extensions/pi-messenger/crew/agents/crew-plan-sync.md"}
+{"ts":"2026-03-04T11:11:13.369Z","type":"edit","agent":"LoudEagle","target":"/home/jake/pi-plugins/plannotator/apps/pi-extension/index.ts"}
+{"ts":"2026-03-04T11:11:18.337Z","type":"edit","agent":"LoudEagle","target":"/home/jake/pi-plugins/plannotator/apps/pi-extension/README.md"}
+{"ts":"2026-03-04T11:11:20.629Z","type":"commit","agent":"LoudEagle","preview":"feat(pi-extension): allow web research tools in planning mode"}
+{"ts":"2026-03-04T14:45:21.651Z","type":"leave","agent":"LoudEagle"}
