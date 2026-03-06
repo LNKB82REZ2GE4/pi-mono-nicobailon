@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `openai-codex-1m/gpt-5.4` as a subscription-backed experimental 1M-context Codex model profile while keeping the built-in `openai-codex/gpt-5.4` 272k profile unchanged.
+
+### Changed
+
+- Reused `openai-codex` OAuth credentials for the `openai-codex-1m` alias provider so subscription-aware UI integrations continue to treat it as a subscription model.
+
 ## [0.56.2] - 2026-03-05
 
 ### New Features

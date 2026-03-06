@@ -583,6 +583,22 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("built-in model aliases", () => {
+		test("adds GPT-5.4 1M experimental alias provider that reuses Codex model metadata", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const aliasModel = registry.find("openai-codex-1m", "gpt-5.4");
+			const sourceModel = registry.find("openai-codex", "gpt-5.4");
+
+			expect(aliasModel).toBeDefined();
+			expect(sourceModel).toBeDefined();
+			expect(aliasModel?.name).toBe("GPT-5.4 (1M Experimental)");
+			expect(aliasModel?.contextWindow).toBe(1_000_000);
+			expect(aliasModel?.api).toBe(sourceModel?.api);
+			expect(aliasModel?.baseUrl).toBe(sourceModel?.baseUrl);
+			expect(aliasModel?.cost).toEqual(sourceModel?.cost);
+		});
+	});
+
 	describe("dynamic provider lifecycle", () => {
 		test("unregisterProvider removes custom OAuth provider and restores built-in OAuth provider", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);

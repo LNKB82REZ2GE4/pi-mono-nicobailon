@@ -146,6 +146,16 @@ function emptyCustomModelsResult(error?: string): CustomModelsResult {
 	return { models: [], overrides: new Map(), modelOverrides: new Map(), error };
 }
 
+const BUILTIN_MODEL_ALIASES = [
+	{
+		provider: "openai-codex-1m",
+		sourceProvider: "openai-codex",
+		sourceModelId: "gpt-5.4",
+		name: "GPT-5.4 (1M Experimental)",
+		contextWindow: 1_000_000,
+	},
+] as const;
+
 function mergeCompat(
 	baseCompat: Model<Api>["compat"],
 	overrideCompat: ModelOverride["compat"],
@@ -281,7 +291,7 @@ export class ModelRegistry {
 			// Keep built-in models even if custom models failed to load
 		}
 
-		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides);
+		const builtInModels = this.addBuiltInModelAliases(this.loadBuiltInModels(overrides, modelOverrides));
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		// Let OAuth providers modify their models (e.g., update baseUrl)
@@ -341,6 +351,25 @@ export class ModelRegistry {
 			}
 		}
 		return merged;
+	}
+
+	private addBuiltInModelAliases(models: Model<Api>[]): Model<Api>[] {
+		const aliased = [...models];
+		for (const alias of BUILTIN_MODEL_ALIASES) {
+			const sourceModel = models.find(
+				(model) => model.provider === alias.sourceProvider && model.id === alias.sourceModelId,
+			);
+			if (!sourceModel) continue;
+
+			const aliasModel: Model<Api> = {
+				...sourceModel,
+				provider: alias.provider,
+				name: alias.name,
+				contextWindow: alias.contextWindow,
+			};
+			aliased.push(aliasModel);
+		}
+		return aliased;
 	}
 
 	private loadCustomModels(modelsJsonPath: string): CustomModelsResult {

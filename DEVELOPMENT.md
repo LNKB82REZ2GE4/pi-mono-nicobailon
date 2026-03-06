@@ -15,20 +15,48 @@ The **globally installed** `pi` binary lives at:
 ```
 ~/.local/share/mise/installs/node/25.2.1/lib/node_modules/@mariozechner/pi-coding-agent
 ```
-This is a static copy — it does **not** auto-update from `~/pi-mono`.
+
+Global install can be in one of two modes:
+1. **Static npm install** (`npm install -g ...`) — separate copy
+2. **Linked install** (`npm link`) — symlink to `~/pi-mono/packages/coding-agent`
+
+Check which mode is active:
+```bash
+ls -l ~/.local/share/mise/installs/node/25.2.1/lib/node_modules/@mariozechner/pi-coding-agent
+```
+
+Important: in linked mode, `pi` still runs compiled files from `dist/`. Source edits in `src/` are not picked up globally until you rebuild.
 
 ## Stable vs Dev Builds
 
 | | Location | Command |
 |---|---|---|
-| **Stable** (global) | npm global install | `pi` |
+| **Stable** (global static install) | npm global install | `pi` |
+| **Global linked to repo** | symlink to `~/pi-mono/packages/coding-agent` | `pi` (uses repo `dist/`) |
 | **Dev** (this repo) | `~/pi-mono` | `./pi-test.sh` or build + run directly |
 
-To **promote your dev build to global**:
+## Promotion workflow for pi-mono changes (required)
+
+When a coding agent has finished a change and it is approved:
+
+1. **Commit only intended files**
+2. **Push to your fork**
+3. **Rebuild so global linked `pi` picks up changes**
+
+Typical sequence:
 ```bash
+git status
+git add <specific-files>
+git commit -m "<message>"
+git push origin <branch>
+
+# Rebuild + (re)link global pi from this repo
 ./install-pi.sh
 ```
-This builds the repo and runs `npm link` in `packages/coding-agent`, replacing the global binary. Run this only when you're happy with your changes.
+
+Notes:
+- If global `pi` is already linked to this repo, rebuild is what matters. Re-running `npm link` is harmless.
+- If global `pi` is a static npm install, rebuilding this repo does nothing until you install/link it.
 
 To **restore a clean upstream release** as your global install:
 ```bash
@@ -58,52 +86,63 @@ git merge upstream/main
 
 ## Plugin Forks (`~/pi-plugins/`)
 
-All installed plugins have been forked to `LNKB82REZ2GE4` on GitHub and cloned locally. Each has:
-- `origin` → your GitHub fork (fetch + push)
-- `upstream` → the original author's repo (fetch only)
+Use `~/pi-plugins` as the canonical workspace for plugin development and maintenance.
+Each maintained plugin should have:
+- a local clone under `~/pi-plugins/<repo>`
+- `origin` pointing to your fork (`LNKB82REZ2GE4`)
+- `upstream` pointing to the original repository
 
-| Local dir | npm package | Upstream |
-|---|---|---|
-| `pi-annotate` | `pi-annotate` | nicobailon/pi-annotate |
-| `pi-ask-tool` | `pi-ask-tool-extension` | devkade/pi-ask-tool |
-| `pi-doom` | `pi-doom` | badlogic/pi-doom |
-| `pi-extensions` | `@tmustier/pi-files-widget`, `@tmustier/extending-pi` | tmustier/pi-extensions |
-| `pi-extension-settings` | `@juanibiapina/pi-extension-settings` | juanibiapina/pi-extension-settings |
-| `pi-extmgr` | `pi-extmgr` | ayagmar/pi-extmgr |
-| `pi-gitnexus` | `pi-gitnexus` | tintinweb/pi-gitnexus |
-| `pi-mermaid` | `pi-mermaid` | Gurpartap/pi-mermaid |
-| `pi-messenger-bridge` | *(local path)* | tintinweb/pi-messenger-bridge |
-| `pi-nes` | `@tmustier/pi-nes` | tmustier/pi-nes |
-| `pi-packages` | `@benvargas/pi-antigravity-image-gen` | ben-vargas/pi-packages |
-| `pi-peon-ping` | `pi-peon-ping` | joshuadavidthomas/pi-peon-ping |
-| `pi-plan` | `@devkade/pi-plan` | devkade/pi-plan |
-| `pi-powerbar` | `@juanibiapina/pi-powerbar` | juanibiapina/pi-powerbar |
-| `pi-powerline-footer` | `pi-powerline-footer` | nicobailon/pi-powerline-footer |
-| `pi-smart-sessions` | `pi-smart-sessions` | HazAT/pi-smart-sessions |
-| `pi-theme-jellybeans` | `@aliou/pi-theme-jellybeans` | aliou/pi-theme-jellybeans |
-| `pi-tmux-window-name` | `pi-tmux-window-name` | default-anton/pi-tmux-window-name |
-| `pi-tokyonight` | `@juanibiapina/pi-tokyonight` | juanibiapina/pi-tokyonight |
-| `pi-web-access` | `pi-web-access` | nicobailon/pi-web-access |
-| `plannotator` | `@plannotator/pi-extension` *(local path)* | backnotprop/plannotator |
+### Required plugin audit (run before plugin work)
 
-### Normal workflow — using npm packages (no local changes needed)
-
-Most plugins are loaded from npm in `settings.json` as `npm:package-name`. You don't need to do anything with the local clones unless you want to modify a plugin. Update all npm plugins with:
+1. List enabled plugins in pi:
 ```bash
-pi ext update
+pi ext list
+```
+2. Inspect configured package sources:
+```bash
+python -m json.tool ~/.pi/agent/settings.json
+```
+3. List local plugin directories:
+```bash
+find ~/pi-plugins -mindepth 1 -maxdepth 1 -type d | sort
+```
+4. For every enabled plugin, ensure a corresponding personal fork exists locally and on GitHub.
+5. Verify remotes for each maintained plugin:
+```bash
+git -C ~/pi-plugins/<plugin> remote -v
 ```
 
-### Modifying a plugin locally
+### Source modes for plugins
 
-1. Make changes in `~/pi-plugins/<plugin>/`
-2. Build it: `cd ~/pi-plugins/<plugin> && npm install && npm run build`
-3. Switch `settings.json` from `npm:package-name` to `/home/jake/pi-plugins/<plugin>` for that plugin
-4. Restart pi — it will load your local build
-5. When happy, push to your fork and optionally publish to npm
+- **npm package (`npm:<package>`)**: stable mode, managed with `pi ext update`
+- **local path (`/home/jake/pi-plugins/<plugin>`)**: development mode, requires local builds
+- **GitHub URL**: acceptable for pinning forks, but local path is preferred while iterating
 
-### Switching back to npm version
+### Promotion workflow for plugin changes (required)
 
-Change the entry in `settings.json` back from the absolute path to `npm:package-name`.
+When a coding agent has finished a plugin change and it is approved:
+
+1. **Commit only intended plugin files**
+2. **Push to your personal fork**
+3. **Build/rebuild the plugin**
+4. **Install/activate it in the global pi environment**
+5. **Reload/restart pi and verify behavior**
+
+Typical sequence:
+```bash
+cd ~/pi-plugins/<plugin>
+git status
+git add <specific-files>
+git commit -m "<message>"
+git push origin <branch>
+npm install
+npm run build
+```
+
+Activation rules:
+- If using a **local path** in `settings.json`: run `/reload` (or restart pi) after build.
+- If using an **npm package**: publish/update the package version, then run `pi ext update`.
+- If using a **GitHub URL** source: update the URL/ref in `settings.json`, then `/reload`.
 
 ### Pull upstream changes into a plugin fork
 
@@ -115,22 +154,6 @@ git merge upstream/main
 git push origin main
 ```
 
-### pi-messenger-bridge (already local)
-
-Loaded from local path — built and active. After changes:
-```bash
-cd ~/pi-plugins/pi-messenger-bridge && npm run build
-# No settings.json change needed, already on local path
-```
-
-### plannotator (@plannotator/pi-extension)
-
-The pi extension lives in `apps/pi-extension` within the monorepo. Loaded from local path. After changes:
-```bash
-cd ~/pi-plugins/plannotator/apps/pi-extension
-npm install && npm run build  # if applicable
-```
-
 ## Settings (`~/.pi/agent/settings.json`)
 
 Plugin load order in `packages` array:
@@ -138,12 +161,10 @@ Plugin load order in `packages` array:
 2. Absolute paths (`/home/jake/pi-plugins/...`) — local forks, built locally
 3. GitHub URLs — avoid for day-to-day dev; prefer local clones while iterating
 
-### Current status bar setup
+### Personal active-package notes
 
-- `pi-powerbar` has been removed from active packages (redundant).
-- `pi-powerline-footer` now includes subscription windows itself via bundled `@marckrenn/pi-sub-core`.
-- Active source is the fork URL: `https://github.com/LNKB82REZ2GE4/pi-powerline-footer`
-- For local iteration on that extension, temporarily switch back to `/home/jake/pi-plugins/pi-powerline-footer`.
+Keep this section optional and current. If package-specific notes become stale, remove or update them.
+Prefer source-of-truth checks (`pi ext list` + `~/.pi/agent/settings.json`) over hardcoded package state.
 
 ## Adding a New Plugin Fork
 

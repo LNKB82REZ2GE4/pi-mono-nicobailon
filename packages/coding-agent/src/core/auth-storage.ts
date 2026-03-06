@@ -154,6 +154,10 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 /**
  * Credential storage backed by a JSON file.
  */
+const AUTH_PROVIDER_ALIASES: Record<string, string> = {
+	"openai-codex-1m": "openai-codex",
+};
+
 export class AuthStorage {
 	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
@@ -214,6 +218,10 @@ export class AuthStorage {
 		return JSON.parse(content) as AuthStorageData;
 	}
 
+	private resolveProviderId(provider: string): string {
+		return AUTH_PROVIDER_ALIASES[provider] ?? provider;
+	}
+
 	/**
 	 * Reload credentials from storage.
 	 */
@@ -257,7 +265,7 @@ export class AuthStorage {
 	 * Get credential for a provider.
 	 */
 	get(provider: string): AuthCredential | undefined {
-		return this.data[provider] ?? undefined;
+		return this.data[provider] ?? this.data[this.resolveProviderId(provider)] ?? undefined;
 	}
 
 	/**
@@ -287,7 +295,8 @@ export class AuthStorage {
 	 * Check if credentials exist for a provider in auth.json.
 	 */
 	has(provider: string): boolean {
-		return provider in this.data;
+		const resolvedProvider = this.resolveProviderId(provider);
+		return provider in this.data || resolvedProvider in this.data;
 	}
 
 	/**
@@ -295,10 +304,11 @@ export class AuthStorage {
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
 	hasAuth(provider: string): boolean {
-		if (this.runtimeOverrides.has(provider)) return true;
-		if (this.data[provider]) return true;
-		if (getEnvApiKey(provider)) return true;
-		if (this.fallbackResolver?.(provider)) return true;
+		const resolvedProvider = this.resolveProviderId(provider);
+		if (this.runtimeOverrides.has(provider) || this.runtimeOverrides.has(resolvedProvider)) return true;
+		if (this.data[provider] || this.data[resolvedProvider]) return true;
+		if (getEnvApiKey(provider) || getEnvApiKey(resolvedProvider)) return true;
+		if (this.fallbackResolver?.(provider) || this.fallbackResolver?.(resolvedProvider)) return true;
 		return false;
 	}
 
@@ -395,20 +405,22 @@ export class AuthStorage {
 	 * 5. Fallback resolver (models.json custom providers)
 	 */
 	async getApiKey(providerId: string): Promise<string | undefined> {
+		const resolvedProviderId = this.resolveProviderId(providerId);
+
 		// Runtime override takes highest priority
-		const runtimeKey = this.runtimeOverrides.get(providerId);
+		const runtimeKey = this.runtimeOverrides.get(providerId) ?? this.runtimeOverrides.get(resolvedProviderId);
 		if (runtimeKey) {
 			return runtimeKey;
 		}
 
-		const cred = this.data[providerId];
+		const cred = this.data[providerId] ?? this.data[resolvedProviderId];
 
 		if (cred?.type === "api_key") {
 			return resolveConfigValue(cred.key);
 		}
 
 		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
+			const provider = getOAuthProvider(providerId) ?? getOAuthProvider(resolvedProviderId);
 			if (!provider) {
 				// Unknown OAuth provider, can't get API key
 				return undefined;
@@ -420,7 +432,7 @@ export class AuthStorage {
 			if (needsRefresh) {
 				// Use locked refresh to prevent race conditions
 				try {
-					const result = await this.refreshOAuthTokenWithLock(providerId);
+					const result = await this.refreshOAuthTokenWithLock(resolvedProviderId);
 					if (result) {
 						return result.apiKey;
 					}
@@ -428,7 +440,7 @@ export class AuthStorage {
 					this.recordError(error);
 					// Refresh failed - re-read file to check if another instance succeeded
 					this.reload();
-					const updatedCred = this.data[providerId];
+					const updatedCred = this.data[providerId] ?? this.data[resolvedProviderId];
 
 					if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
 						// Another instance refreshed successfully, use those credentials
@@ -446,11 +458,11 @@ export class AuthStorage {
 		}
 
 		// Fall back to environment variable
-		const envKey = getEnvApiKey(providerId);
+		const envKey = getEnvApiKey(providerId) ?? getEnvApiKey(resolvedProviderId);
 		if (envKey) return envKey;
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
-		return this.fallbackResolver?.(providerId) ?? undefined;
+		return this.fallbackResolver?.(providerId) ?? this.fallbackResolver?.(resolvedProviderId) ?? undefined;
 	}
 
 	/**

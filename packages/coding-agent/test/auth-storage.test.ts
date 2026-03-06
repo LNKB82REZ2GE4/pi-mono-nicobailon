@@ -451,4 +451,38 @@ describe("AuthStorage", () => {
 			expect(apiKey).toBe("stored-key");
 		});
 	});
+
+	describe("provider aliases", () => {
+		test("openai-codex-1m reuses openai-codex oauth credentials", async () => {
+			registerOAuthProvider({
+				id: "openai-codex",
+				name: "OpenAI Codex",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken(credentials) {
+					return credentials;
+				},
+				getApiKey(credentials) {
+					return credentials.access;
+				},
+			});
+
+			writeAuthJson({
+				"openai-codex": {
+					type: "oauth",
+					access: "codex-access-token",
+					refresh: "codex-refresh-token",
+					expires: Date.now() + 60_000,
+					accountId: "account-123",
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(authStorage.hasAuth("openai-codex-1m")).toBe(true);
+			expect(authStorage.get("openai-codex-1m")?.type).toBe("oauth");
+			expect(await authStorage.getApiKey("openai-codex-1m")).toBe("codex-access-token");
+		});
+	});
 });
