@@ -79,6 +79,7 @@ jobs:
         run: git push origin upstream-sync --force
 
       - name: Create PR
+        id: create_pr
         if: steps.check.outputs.has_changes == 'true' && steps.existing_pr.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -87,6 +88,7 @@ jobs:
           BEHIND=${{ steps.check.outputs.behind }}
 
           BODY_FILE=$(mktemp)
+          PAYLOAD_FILE=$(mktemp)
           cat > "$BODY_FILE" <<'EOF'
           ## Upstream Sync
 
@@ -108,29 +110,44 @@ jobs:
           _This PR was automatically created by the [Upstream Sync](/.github/workflows/upstream-sync.yml) workflow._
           EOF
 
-          BODY_FILE="$BODY_FILE" COMMITS="$COMMITS" BEHIND="$BEHIND" python - <<'PY'
+          BODY_FILE="$BODY_FILE" PAYLOAD_FILE="$PAYLOAD_FILE" COMMITS="$COMMITS" BEHIND="$BEHIND" python - <<'PY'
+          import json
           import os
           from pathlib import Path
 
-          path = Path(os.environ["BODY_FILE"])
-          body = path.read_text()
+          body_path = Path(os.environ["BODY_FILE"])
+          body = body_path.read_text()
           body = body.replace("__BEHIND__", os.environ["BEHIND"])
           body = body.replace("__COMMITS__", os.environ["COMMITS"])
-          path.write_text(body)
+          body_path.write_text(body)
+
+          payload = {
+              "title": f"🔄 Sync upstream: {os.environ['BEHIND']} new commit(s)",
+              "head": "upstream-sync",
+              "base": "main",
+              "body": body,
+          }
+          Path(os.environ["PAYLOAD_FILE"]).write_text(json.dumps(payload))
           PY
 
-          PR_URL=$(gh pr create \
-            --title "🔄 Sync upstream: $BEHIND new commit(s)" \
-            --head "upstream-sync" \
-            --base "main" \
-            --body-file "$BODY_FILE")
-          PR_NUMBER=${PR_URL##*/}
+          PR_JSON=$(gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            --input "$PAYLOAD_FILE")
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+          PR_URL=$(echo "$PR_JSON" | jq -r '.html_url')
 
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "### 🔁 Created PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
 
           if gh api "repos/${GITHUB_REPOSITORY}/labels/upstream-sync" >/dev/null 2>&1; then
-            gh pr edit "$PR_NUMBER" --add-label "upstream-sync" >/dev/null
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/$PR_NUMBER/labels" \
+              -f labels[]=upstream-sync >/dev/null
           fi
 
-          rm -f "$BODY_FILE"
+          rm -f "$BODY_FILE" "$PAYLOAD_FILE"
