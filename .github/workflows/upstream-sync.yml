@@ -5,7 +5,6 @@ on:
     # Run daily at 6:00 AM UTC
     - cron: '0 6 * * *'
   workflow_dispatch:
-    # Allow manual trigger
 
 permissions:
   contents: write
@@ -37,117 +36,150 @@ jobs:
         run: |
           BEHIND=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$BEHIND" >> $GITHUB_OUTPUT
-          
+
           if [ "$BEHIND" -gt 0 ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "### 📥 Upstream has $BEHIND new commit(s):" >> $GITHUB_STEP_SUMMARY
+            echo "### Upstream has $BEHIND new commit(s):" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             git log --oneline HEAD..upstream/main >> $GITHUB_STEP_SUMMARY
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "### ✅ Already up to date with upstream" >> $GITHUB_STEP_SUMMARY
+            echo "### Already up to date with upstream" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Check for existing PR
-        id: existing_pr
+      - name: Attempt merge and auto-resolve known conflicts
+        id: merge
         if: steps.check.outputs.has_changes == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING=$(gh pr list --head "upstream-sync" --json number --jq '.[0].number // empty')
-          if [ -n "$EXISTING" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "number=$EXISTING" >> $GITHUB_OUTPUT
+          if git merge upstream/main --no-edit -m "Merge upstream/main into main"; then
+            echo "status=clean" >> $GITHUB_OUTPUT
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            # Collect conflicting files
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            UNRESOLVED=""
+
+            for f in $(git diff --name-only --diff-filter=U); do
+              case "$f" in
+                packages/coding-agent/CHANGELOG.md)
+                  # Auto-resolve: preserve our [Unreleased] block above upstream's new release sections
+                  python3 - "$f" <<'PY'
+          import sys, re
+
+          path = sys.argv[1]
+          text = open(path).read()
+
+          def resolve(text):
+              pattern = re.compile(
+                  r'<<<<<<< HEAD\n(.*?)\n=======\n(.*?)\n>>>>>>> [^\n]+\n',
+                  re.DOTALL
+              )
+              def pick(m):
+                  ours = m.group(1).rstrip('\n')
+                  theirs = m.group(2).rstrip('\n')
+                  return ours + '\n\n' + theirs + '\n'
+              resolved = pattern.sub(pick, text)
+              if '<<<<<<<' in resolved or '>>>>>>>' in resolved:
+                  return None
+              return resolved
+
+          result = resolve(text)
+          if result:
+              open(path, 'w').write(result)
+              sys.exit(0)
+          sys.exit(1)
+          PY
+                  if [ $? -eq 0 ]; then
+                    git add "$f"
+                    echo "Auto-resolved: $f (CHANGELOG — kept local [Unreleased], appended upstream releases)" >> $GITHUB_STEP_SUMMARY
+                  else
+                    UNRESOLVED="$UNRESOLVED $f"
+                  fi
+                  ;;
+                packages/ai/src/models.generated.ts)
+                  # Auto-resolve: take upstream (file is auto-generated)
+                  git checkout --theirs "$f"
+                  git add "$f"
+                  echo "Auto-resolved: $f (auto-generated — accepted upstream)" >> $GITHUB_STEP_SUMMARY
+                  ;;
+                *)
+                  UNRESOLVED="$UNRESOLVED $f"
+                  ;;
+              esac
+            done
+
+            if [ -z "$(echo $UNRESOLVED | tr -d ' ')" ]; then
+              git commit -m "Merge upstream/main into main"
+              echo "status=clean" >> $GITHUB_OUTPUT
+              echo "Auto-resolved all conflicts" >> $GITHUB_STEP_SUMMARY
+            else
+              git merge --abort
+              echo "status=conflicted" >> $GITHUB_OUTPUT
+              echo "unresolved=$UNRESOLVED" >> $GITHUB_OUTPUT
+              echo "### Conflicts require manual resolution:" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "$UNRESOLVED" | tr ' ' '\n' | grep -v '^$' >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
 
-      - name: Create sync branch
-        if: steps.check.outputs.has_changes == 'true' && steps.existing_pr.outputs.exists != 'true'
+      - name: Push directly to main
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.status == 'clean'
         run: |
-          git checkout -b upstream-sync
-          git merge upstream/main --no-edit || {
-            echo "### ⚠️ Merge conflicts detected" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The PR will be created with conflicts. Resolve them manually." >> $GITHUB_STEP_SUMMARY
-            git add -A
-            git commit -m "Merge upstream with conflicts" || true
-          }
+          git push origin main
+          echo "### Merged and pushed directly to main — no manual action needed" >> $GITHUB_STEP_SUMMARY
 
-      - name: Push sync branch
-        if: steps.check.outputs.has_changes == 'true' && steps.existing_pr.outputs.exists != 'true'
-        run: git push origin upstream-sync --force
-
-      - name: Create PR
-        id: create_pr
-        if: steps.check.outputs.has_changes == 'true' && steps.existing_pr.outputs.exists != 'true'
+      - name: Open or update conflict PR
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.status == 'conflicted'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMITS=$(git log --oneline main..upstream/main | head -20 || true)
-          BEHIND=${{ steps.check.outputs.behind }}
+          UNRESOLVED="${{ steps.merge.outputs.unresolved }}"
+          BEHIND="${{ steps.check.outputs.behind }}"
+          NEW_COMMITS="$(git log --oneline HEAD..upstream/main | head -30)"
 
-          BODY_FILE=$(mktemp)
-          PAYLOAD_FILE=$(mktemp)
-          cat > "$BODY_FILE" <<'EOF'
-          ## Upstream Sync
+          EXISTING=$(gh pr list --head "upstream-sync" --state open --json number --jq '.[0].number // empty')
 
-          This PR brings in the latest changes from [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
+          # Always refresh the branch to latest upstream so the diff is meaningful
+          git checkout -B upstream-sync upstream/main
+          git push origin upstream-sync --force
 
-          ### New Commits (__BEHIND__ total)
-          ```text
-          __COMMITS__
-          ```
+          FILE_LIST=$(echo "$UNRESOLVED" | tr ' ' '\n' | grep -v '^$' | sed 's/^/- `/' | sed 's/$/'\''\`/')
 
-          ---
+          BODY="## Upstream Sync — Manual Resolution Required
 
-          **Instructions:**
-          1. Review the changes below
-          2. Resolve any merge conflicts if present
-          3. Merge when ready
-          4. Delete this branch after merging
+          Upstream had **${BEHIND} new commit(s)** but the merge could not complete automatically.
 
-          _This PR was automatically created by the [Upstream Sync](/.github/workflows/upstream-sync.yml) workflow._
-          EOF
+          ### New upstream commits
+          \`\`\`
+          ${NEW_COMMITS}
+          \`\`\`
 
-          BODY_FILE="$BODY_FILE" PAYLOAD_FILE="$PAYLOAD_FILE" COMMITS="$COMMITS" BEHIND="$BEHIND" python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
+          ### Files with unresolvable conflicts
+          ${FILE_LIST}
 
-          body_path = Path(os.environ["BODY_FILE"])
-          body = body_path.read_text()
-          body = body.replace("__BEHIND__", os.environ["BEHIND"])
-          body = body.replace("__COMMITS__", os.environ["COMMITS"])
-          body_path.write_text(body)
+          > Auto-resolved automatically: \`CHANGELOG.md\` and \`*.generated.ts\` files (if they conflicted).
 
-          payload = {
-              "title": f"🔄 Sync upstream: {os.environ['BEHIND']} new commit(s)",
-              "head": "upstream-sync",
-              "base": "main",
-              "body": body,
-          }
-          Path(os.environ["PAYLOAD_FILE"]).write_text(json.dumps(payload))
-          PY
+          ### Resolve locally
+          \`\`\`bash
+          git fetch upstream
+          git merge upstream/main --no-edit
+          # fix conflicts in the files listed above
+          git add <resolved files>
+          git commit
+          git push origin main
+          \`\`\`
 
-          PR_JSON=$(gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/pulls" \
-            --input "$PAYLOAD_FILE")
-          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
-          PR_URL=$(echo "$PR_JSON" | jq -r '.html_url')
+          _Once you push to \`main\`, your local sync service will pick up the changes and rebuild automatically._"
 
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-          echo "### 🔁 Created PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
-          echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
-
-          if gh api "repos/${GITHUB_REPOSITORY}/labels/upstream-sync" >/dev/null 2>&1; then
-            gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/issues/$PR_NUMBER/labels" \
-              -f labels[]=upstream-sync >/dev/null
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" \
+              --title "Upstream sync: manual conflict resolution needed (${BEHIND} commits)" \
+              --body "$BODY"
+            echo "Updated existing PR #${EXISTING}" >> $GITHUB_STEP_SUMMARY
+          else
+            gh pr create \
+              --title "Upstream sync: manual conflict resolution needed (${BEHIND} commits)" \
+              --body "$BODY" \
+              --head "upstream-sync" \
+              --base "main"
           fi
-
-          rm -f "$BODY_FILE" "$PAYLOAD_FILE"
