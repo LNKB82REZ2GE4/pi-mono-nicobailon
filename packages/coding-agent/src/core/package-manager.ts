@@ -7,6 +7,7 @@ import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME } from "../config.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
+import { isStdoutTakenOver } from "./output-guard.js";
 import type { PackageSource, SettingsManager } from "./settings-manager.js";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -860,16 +861,28 @@ export class DefaultPackageManager implements PackageManager {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
 		const identity = source ? this.getPackageIdentity(source) : undefined;
+		let matched = false;
 
 		for (const pkg of globalSettings.packages ?? []) {
 			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
 			if (identity && this.getPackageIdentity(sourceStr, "user") !== identity) continue;
+			matched = true;
 			await this.updateSourceForScope(sourceStr, "user");
 		}
 		for (const pkg of projectSettings.packages ?? []) {
 			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
 			if (identity && this.getPackageIdentity(sourceStr, "project") !== identity) continue;
+			matched = true;
 			await this.updateSourceForScope(sourceStr, "project");
+		}
+
+		if (source && !matched) {
+			throw new Error(
+				this.buildNoMatchingPackageMessage(source, [
+					...(globalSettings.packages ?? []),
+					...(projectSettings.packages ?? []),
+				]),
+			);
 		}
 	}
 
@@ -881,7 +894,14 @@ export class DefaultPackageManager implements PackageManager {
 		if (parsed.type === "npm") {
 			if (parsed.pinned) return;
 			await this.withProgress("update", source, `Updating ${source}...`, async () => {
-				await this.installNpm(parsed, scope, false);
+				await this.installNpm(
+					{
+						...parsed,
+						spec: `${parsed.name}@latest`,
+					},
+					scope,
+					false,
+				);
 			});
 			return;
 		}
@@ -1088,6 +1108,39 @@ export class DefaultPackageManager implements PackageManager {
 		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
 	}
 
+	private buildNoMatchingPackageMessage(source: string, configuredPackages: PackageSource[]): string {
+		const suggestion = this.findSuggestedConfiguredSource(source, configuredPackages);
+		if (!suggestion) {
+			return `No matching package found for ${source}`;
+		}
+		return `No matching package found for ${source}. Did you mean ${suggestion}?`;
+	}
+
+	private findSuggestedConfiguredSource(source: string, configuredPackages: PackageSource[]): string | undefined {
+		const trimmedSource = source.trim();
+		const suggestions = new Set<string>();
+
+		for (const pkg of configuredPackages) {
+			const sourceStr = this.getPackageSourceString(pkg);
+			const parsed = this.parseSource(sourceStr);
+			if (parsed.type === "npm") {
+				if (trimmedSource === parsed.name || trimmedSource === parsed.spec) {
+					suggestions.add(sourceStr);
+				}
+				continue;
+			}
+			if (parsed.type === "git") {
+				const shorthand = `${parsed.host}/${parsed.path}`;
+				const shorthandWithRef = parsed.ref ? `${shorthand}@${parsed.ref}` : undefined;
+				if (trimmedSource === shorthand || (shorthandWithRef && trimmedSource === shorthandWithRef)) {
+					suggestions.add(sourceStr);
+				}
+			}
+		}
+
+		return suggestions.values().next().value;
+	}
+
 	private packageSourcesMatch(existing: PackageSource, inputSource: string, scope: SourceScope): boolean {
 		const left = this.getSourceMatchKeyForSettings(this.getPackageSourceString(existing), scope);
 		const right = this.getSourceMatchKeyForInput(inputSource);
@@ -1224,6 +1277,23 @@ export class DefaultPackageManager implements PackageManager {
 			throw new Error("Failed to determine remote HEAD");
 		}
 		return match[1];
+	}
+
+	private async getLocalGitUpdateTarget(installedPath: string): Promise<{ ref: string; head: string }> {
+		try {
+			const head = await this.runCommandCapture("git", ["rev-parse", "@{upstream}"], {
+				cwd: installedPath,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+			});
+			return { ref: "@{upstream}", head };
+		} catch {
+			await this.runCommand("git", ["remote", "set-head", "origin", "-a"], { cwd: installedPath }).catch(() => {});
+			const head = await this.runCommandCapture("git", ["rev-parse", "origin/HEAD"], {
+				cwd: installedPath,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+			});
+			return { ref: "origin/HEAD", head };
+		}
 	}
 
 	private async getGitUpstreamRef(installedPath: string): Promise<string | undefined> {
@@ -1411,13 +1481,16 @@ export class DefaultPackageManager implements PackageManager {
 		// Fetch latest from remote (handles force-push by getting new history)
 		await this.runCommand("git", ["fetch", "--prune", "origin"], { cwd: targetDir });
 
-		// Reset to tracking branch. Fall back to origin/HEAD when no upstream is configured.
-		try {
-			await this.runCommand("git", ["reset", "--hard", "@{upstream}"], { cwd: targetDir });
-		} catch {
-			await this.runCommand("git", ["remote", "set-head", "origin", "-a"], { cwd: targetDir }).catch(() => {});
-			await this.runCommand("git", ["reset", "--hard", "origin/HEAD"], { cwd: targetDir });
+		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
+			cwd: targetDir,
+			timeoutMs: NETWORK_TIMEOUT_MS,
+		});
+		const target = await this.getLocalGitUpdateTarget(targetDir);
+		if (localHead.trim() === target.head.trim()) {
+			return;
 		}
+
+		await this.runCommand("git", ["reset", "--hard", target.ref], { cwd: targetDir });
 
 		// Clean untracked files (extensions should be pristine)
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
@@ -2019,7 +2092,7 @@ export class DefaultPackageManager implements PackageManager {
 		return new Promise((resolvePromise, reject) => {
 			const child = spawn(command, args, {
 				cwd: options?.cwd,
-				stdio: "inherit",
+				stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
 				shell: process.platform === "win32",
 			});
 			child.on("error", reject);
