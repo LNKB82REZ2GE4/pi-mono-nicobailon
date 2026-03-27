@@ -732,7 +732,12 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
 	input: Record<string, unknown>;
 }
 
-/** Fired before a tool executes. Can block. */
+/**
+ * Fired before a tool executes. Can block.
+ *
+ * `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
+ * Later `tool_call` handlers see earlier mutations. No re-validation is performed after mutation.
+ */
 export type ToolCallEvent =
 	| BashToolCallEvent
 	| ReadToolCallEvent
@@ -894,6 +899,7 @@ export interface ContextEventResult {
 export type BeforeProviderRequestEventResult = unknown;
 
 export interface ToolCallEventResult {
+	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
 	block?: boolean;
 	reason?: string;
 }

@@ -431,7 +431,7 @@ export class AuthStorage {
 	 * 4. Environment variable
 	 * 5. Fallback resolver (models.json custom providers)
 	 */
-	async getApiKey(providerId: string): Promise<string | undefined> {
+	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
 		this.reload();
 		const resolvedProviderId = this.resolveProviderId(providerId);
 
@@ -490,7 +490,11 @@ export class AuthStorage {
 		if (envKey) return envKey;
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
-		return this.fallbackResolver?.(providerId) ?? this.fallbackResolver?.(resolvedProviderId) ?? undefined;
+		if (options?.includeFallback !== false) {
+			return this.fallbackResolver?.(providerId) ?? this.fallbackResolver?.(resolvedProviderId) ?? undefined;
+		}
+
+		return undefined;
 	}
 
 	/**

@@ -249,9 +249,11 @@ function collectFiles(
 	return files;
 }
 
+type SkillDiscoveryMode = "pi" | "agents";
+
 function collectSkillEntries(
 	dir: string,
-	includeRootFiles = true,
+	mode: SkillDiscoveryMode,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
 ): string[] {
@@ -264,6 +266,29 @@ function collectSkillEntries(
 
 	try {
 		const dirEntries = readdirSync(dir, { withFileTypes: true });
+
+		for (const entry of dirEntries) {
+			if (entry.name !== "SKILL.md") {
+				continue;
+			}
+
+			const fullPath = join(dir, entry.name);
+			let isFile = entry.isFile();
+			if (entry.isSymbolicLink()) {
+				try {
+					isFile = statSync(fullPath).isFile();
+				} catch {
+					continue;
+				}
+			}
+
+			const relPath = toPosixPath(relative(root, fullPath));
+			if (isFile && !ig.ignores(relPath)) {
+				entries.push(fullPath);
+				return entries;
+			}
+		}
+
 		for (const entry of dirEntries) {
 			if (entry.name.startsWith(".")) continue;
 			if (entry.name === "node_modules") continue;
@@ -283,18 +308,15 @@ function collectSkillEntries(
 			}
 
 			const relPath = toPosixPath(relative(root, fullPath));
-			const ignorePath = isDir ? `${relPath}/` : relPath;
-			if (ig.ignores(ignorePath)) continue;
-
-			if (isDir) {
-				entries.push(...collectSkillEntries(fullPath, false, ig, root));
-			} else if (isFile) {
-				const isRootMd = includeRootFiles && entry.name.endsWith(".md");
-				const isSkillMd = !includeRootFiles && entry.name === "SKILL.md";
-				if (isRootMd || isSkillMd) {
-					entries.push(fullPath);
-				}
+			if (mode === "pi" && dir === root && isFile && entry.name.endsWith(".md") && !ig.ignores(relPath)) {
+				entries.push(fullPath);
+				continue;
 			}
+
+			if (!isDir) continue;
+			if (ig.ignores(`${relPath}/`)) continue;
+
+			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
 		}
 	} catch {
 		// Ignore errors
@@ -303,8 +325,8 @@ function collectSkillEntries(
 	return entries;
 }
 
-function collectAutoSkillEntries(dir: string, includeRootFiles = true): string[] {
-	return collectSkillEntries(dir, includeRootFiles);
+function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[] {
+	return collectSkillEntries(dir, mode);
 }
 
 function findGitRepoRoot(startDir: string): string | null {
@@ -516,7 +538,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
  */
 function collectResourceFiles(dir: string, resourceType: ResourceType): string[] {
 	if (resourceType === "skills") {
-		return collectSkillEntries(dir);
+		return collectSkillEntries(dir, "pi");
 	}
 	if (resourceType === "extensions") {
 		return collectAutoExtensionEntries(dir);
@@ -1279,20 +1301,66 @@ export class DefaultPackageManager implements PackageManager {
 		return match[1];
 	}
 
-	private async getLocalGitUpdateTarget(installedPath: string): Promise<{ ref: string; head: string }> {
+	private async getLocalGitUpdateTarget(
+		installedPath: string,
+	): Promise<{ ref: string; head: string; fetchArgs: string[] }> {
 		try {
+			const upstream = await this.runCommandCapture("git", ["rev-parse", "--abbrev-ref", "@{upstream}"], {
+				cwd: installedPath,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+			});
+			const trimmedUpstream = upstream.trim();
+			if (!trimmedUpstream.startsWith("origin/")) {
+				throw new Error(`Unsupported upstream remote: ${trimmedUpstream}`);
+			}
+			const branch = trimmedUpstream.slice("origin/".length);
+			if (!branch) {
+				throw new Error("Missing upstream branch name");
+			}
 			const head = await this.runCommandCapture("git", ["rev-parse", "@{upstream}"], {
 				cwd: installedPath,
 				timeoutMs: NETWORK_TIMEOUT_MS,
 			});
-			return { ref: "@{upstream}", head };
+			return {
+				ref: "@{upstream}",
+				head,
+				fetchArgs: [
+					"fetch",
+					"--prune",
+					"--no-tags",
+					"origin",
+					`+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+				],
+			};
 		} catch {
 			await this.runCommand("git", ["remote", "set-head", "origin", "-a"], { cwd: installedPath }).catch(() => {});
 			const head = await this.runCommandCapture("git", ["rev-parse", "origin/HEAD"], {
 				cwd: installedPath,
 				timeoutMs: NETWORK_TIMEOUT_MS,
 			});
-			return { ref: "origin/HEAD", head };
+			const originHeadRef = await this.runCommandCapture("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+				cwd: installedPath,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+			}).catch(() => "");
+			const branch = originHeadRef.trim().replace(/^refs\/remotes\/origin\//, "");
+			if (branch) {
+				return {
+					ref: "origin/HEAD",
+					head,
+					fetchArgs: [
+						"fetch",
+						"--prune",
+						"--no-tags",
+						"origin",
+						`+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+					],
+				};
+			}
+			return {
+				ref: "origin/HEAD",
+				head,
+				fetchArgs: ["fetch", "--prune", "--no-tags", "origin", "+HEAD:refs/remotes/origin/HEAD"],
+			};
 		}
 	}
 
@@ -1478,15 +1546,20 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
-		// Fetch latest from remote (handles force-push by getting new history)
-		await this.runCommand("git", ["fetch", "--prune", "origin"], { cwd: targetDir });
+		const target = await this.getLocalGitUpdateTarget(targetDir);
+
+		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
+		await this.runCommand("git", target.fetchArgs, { cwd: targetDir });
 
 		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
 			cwd: targetDir,
 			timeoutMs: NETWORK_TIMEOUT_MS,
 		});
-		const target = await this.getLocalGitUpdateTarget(targetDir);
-		if (localHead.trim() === target.head.trim()) {
+		const refreshedTargetHead = await this.runCommandCapture("git", ["rev-parse", target.ref], {
+			cwd: targetDir,
+			timeoutMs: NETWORK_TIMEOUT_MS,
+		});
+		if (localHead.trim() === refreshedTargetHead.trim()) {
 			return;
 		}
 
@@ -1913,8 +1986,8 @@ export class DefaultPackageManager implements PackageManager {
 		addResources(
 			"skills",
 			[
-				...collectAutoSkillEntries(projectDirs.skills),
-				...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir)),
+				...collectAutoSkillEntries(projectDirs.skills, "pi"),
+				...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir, "agents")),
 			],
 			projectMetadata,
 			projectOverrides.skills,
@@ -1944,7 +2017,7 @@ export class DefaultPackageManager implements PackageManager {
 		);
 		addResources(
 			"skills",
-			[...collectAutoSkillEntries(userDirs.skills), ...collectAutoSkillEntries(userAgentsSkillsDir)],
+			[...collectAutoSkillEntries(userDirs.skills, "pi"), ...collectAutoSkillEntries(userAgentsSkillsDir, "agents")],
 			userMetadata,
 			userOverrides.skills,
 			globalBaseDir,
