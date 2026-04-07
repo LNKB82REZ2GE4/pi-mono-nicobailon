@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.65.2] - 2026-04-06
+
+### Fixed
+
+- Fixed render scheduling under heavy streaming output by coalescing `requestRender()` calls to a 16ms frame budget while preserving immediate `requestRender(true)` behavior.
+
+## [0.65.1] - 2026-04-05
+
+## [0.65.0] - 2026-04-03
+
+### Fixed
+
+- Fixed markdown H1 headings ending with inline code from leaking underline styling into trailing line padding
+- Fixed slash-command argument autocomplete to await async `getArgumentCompletions()` results and ignore invalid return values, preventing crashes when extension commands provide asynchronous completions ([#2719](https://github.com/badlogic/pi-mono/issues/2719))
+- Fixed non-capturing overlay padding from inflating scrollback and corrupting the viewport on terminal widen ([#2758](https://github.com/badlogic/pi-mono/pull/2758) by [@dotBeeps](https://github.com/dotBeeps))
+
+## [0.64.0] - 2026-03-29
+
+### Fixed
+
+- Fixed TUI cell size response handling to consume only exact `CSI 6 ; height ; width t` replies, so bare `Escape` is no longer swallowed while waiting for terminal image metadata ([#2661](https://github.com/badlogic/pi-mono/issues/2661))
+- Fixed Kitty keyboard protocol keypad functional keys to normalize to logical digits, symbols, and navigation keys, so numpad input in terminals such as iTerm2 no longer inserts Private Use Area gibberish or gets ignored ([#2650](https://github.com/badlogic/pi-mono/issues/2650))
+
+## [0.63.2] - 2026-03-29
+
 ## [0.63.1] - 2026-03-27
 
 ## [0.63.0] - 2026-03-27
