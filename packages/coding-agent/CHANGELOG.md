@@ -10,6 +10,13 @@
 
 - Reused `openai-codex` OAuth credentials for the `openai-codex-1m` alias provider so subscription-aware UI integrations continue to treat it as a subscription model.
 
+### Fixed
+
+- Updated `antigravity-image-gen.ts` example extension to use User-Agent version `1.21.9` ([#2901](https://github.com/badlogic/pi-mono/pull/2901) by [@aadishv](https://github.com/aadishv))
+### Added
+
+- Set `PI_CODING_AGENT=true` environment variable at startup so sub-processes can detect they are running inside the coding agent ([#2868](https://github.com/badlogic/pi-mono/issues/2868))
+
 ## [0.66.1] - 2026-04-08
 
 ### Changed
