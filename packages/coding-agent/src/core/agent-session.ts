@@ -913,6 +913,7 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
+			providerId: this.model?.provider,
 		});
 	}
 

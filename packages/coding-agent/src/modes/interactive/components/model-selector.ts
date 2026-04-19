@@ -28,6 +28,23 @@ interface ScopedModelItem {
 
 type ModelScope = "all" | "scoped";
 
+function mergeUniqueModels(...modelLists: Array<ReadonlyArray<Model<any>> | undefined>): ModelItem[] {
+	const merged: ModelItem[] = [];
+	for (const models of modelLists) {
+		for (const model of models ?? []) {
+			if (merged.some((existing) => modelsAreEqual(existing.model, model))) {
+				continue;
+			}
+			merged.push({
+				provider: model.provider,
+				id: model.id,
+				model,
+			});
+		}
+	}
+	return merged;
+}
+
 /**
  * Component that renders a model selector with search
  */
@@ -135,7 +152,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private async loadModels(): Promise<void> {
-		let models: ModelItem[];
+		let availableModels: Model<any>[];
 
 		// Refresh to pick up any changes to models.json
 		this.modelRegistry.refresh();
@@ -148,12 +165,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 		// Load available models (built-in models still work even if models.json failed)
 		try {
-			const availableModels = await this.modelRegistry.getAvailable();
-			models = availableModels.map((model: Model<any>) => ({
-				provider: model.provider,
-				id: model.id,
-				model,
-			}));
+			availableModels = await this.modelRegistry.getAvailable();
 		} catch (error) {
 			this.allModels = [];
 			this.scopedModelItems = [];
@@ -163,21 +175,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return;
 		}
 
-		this.allModels = this.sortModels(models);
 		this.scopedModels = this.scopedModels.map((scoped) => {
 			const refreshed = this.modelRegistry.find(scoped.model.provider, scoped.model.id);
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
-		this.scopedModelItems = this.scopedModels.map((scoped) => ({
-			provider: scoped.model.provider,
-			id: scoped.model.id,
-			model: scoped.model,
-		}));
+		this.scopedModelItems = this.sortModels(mergeUniqueModels(this.scopedModels.map((scoped) => scoped.model)));
+		this.allModels = this.sortModels(
+			mergeUniqueModels(
+				availableModels,
+				this.scopedModels.map((scoped) => scoped.model),
+				this.currentModel ? [this.currentModel] : undefined,
+			),
+		);
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex =
-			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -207,8 +219,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		if (this.scope === scope) return;
 		this.scope = scope;
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
-		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
+		this.selectedIndex = 0;
 		this.filterModels(this.searchInput.getValue());
 		if (this.scopeText) {
 			this.scopeText.setText(this.getScopeText());

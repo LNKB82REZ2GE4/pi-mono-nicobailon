@@ -336,27 +336,40 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[]): string {
+export function formatSkillsForPrompt(skills: Skill[], options: { compact?: boolean } = {}): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
+	const compact = options.compact === true;
 
 	if (visibleSkills.length === 0) {
 		return "";
 	}
 
-	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use the read tool to load a skill's file when the task matches its description.",
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-		"",
-		"<available_skills>",
-	];
+	const lines = compact
+		? [
+				"\n\nSpecialized skills are available.",
+				"Use the read tool to load a skill's SKILL.md only when the task matches.",
+				"Resolve relative paths in a skill against the skill directory.",
+				"",
+				"<available_skills>",
+			]
+		: [
+				"\n\nThe following skills provide specialized instructions for specific tasks.",
+				"Use the read tool to load a skill's file when the task matches its description.",
+				"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+				"",
+				"<available_skills>",
+			];
 
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		if (compact) {
+			lines.push(`- ${escapeXml(skill.name)} — ${escapeXml(skill.filePath)}`);
+		} else {
+			lines.push("  <skill>");
+			lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+			lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+			lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+			lines.push("  </skill>");
+		}
 	}
 
 	lines.push("</available_skills>");

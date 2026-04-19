@@ -40,11 +40,12 @@ describe("issue #3217 scoped model ordering", () => {
 		harnesses.push(harness);
 
 		const orderedIds = harness.models.map((model) => `${model.provider}/${model.id}`);
-		const changes: Array<string[] | null> = [];
+		const changes: Array<string[]> = [];
 		const selector = new ScopedModelsSelectorComponent(
 			{
 				allModels: [...harness.models],
-				enabledModelIds: orderedIds,
+				enabledModelIds: new Set(orderedIds),
+				hasEnabledModelsFilter: true,
 			},
 			{
 				onChange: (enabledModelIds) => {

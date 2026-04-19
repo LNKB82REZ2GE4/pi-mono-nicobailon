@@ -45,9 +45,8 @@ function clearAll(enabledIds: EnabledIds, allIds: string[], targetIds?: string[]
 	return enabledIds.filter((id) => !targets.has(id));
 }
 
-function move(enabledIds: EnabledIds, id: string, delta: number): EnabledIds {
-	if (enabledIds === null) return null;
-	const list = [...enabledIds];
+function move(enabledIds: EnabledIds, allIds: string[], id: string, delta: number): EnabledIds {
+	const list = enabledIds ?? [...allIds];
 	const index = list.indexOf(id);
 	if (index < 0) return list;
 	const newIndex = index + delta;
@@ -71,14 +70,20 @@ interface ModelItem {
 
 export interface ModelsConfig {
 	allModels: Model<any>[];
-	enabledModelIds: string[] | null;
+	enabledModelIds: Set<string>;
+	/** true if enabledModels setting is defined (empty = all enabled) */
+	hasEnabledModelsFilter: boolean;
 }
 
 export interface ModelsCallbacks {
-	/** Called whenever the enabled model set or order changes (session-only, no persist) */
-	onChange: (enabledModelIds: string[] | null) => void | Promise<void>;
+	/**
+	 * Called whenever enabled models change (session-only, no persist).
+	 * enabledModelIds contains the effective enabled set in stable order.
+	 * hasEnabledModelsFilter is false when all models are enabled (no filter).
+	 */
+	onChange: (enabledModelIds: string[], hasEnabledModelsFilter: boolean) => void;
 	/** Called when user wants to persist current selection to settings */
-	onPersist: (enabledModelIds: string[] | null) => void | Promise<void>;
+	onPersist: (enabledModelIds: string[]) => void;
 	onCancel: () => void;
 }
 
@@ -119,7 +124,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			this.allIds.push(fullId);
 		}
 
-		this.enabledIds = config.enabledModelIds === null ? null : [...config.enabledModelIds];
+		this.enabledIds = config.hasEnabledModelsFilter ? [...config.enabledModelIds] : null;
 		this.filteredItems = this.buildItems();
 
 		// Header
@@ -178,7 +183,9 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	}
 
 	private notifyChange(): void {
-		this.callbacks.onChange(this.enabledIds === null ? null : [...this.enabledIds]);
+		const enabledModelIds = this.enabledIds ?? [...this.allIds];
+		const hasEnabledModelsFilter = this.enabledIds !== null;
+		this.callbacks.onChange(enabledModelIds, hasEnabledModelsFilter);
 	}
 
 	private updateList(): void {
@@ -239,19 +246,18 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Alt+Up/Down - Reorder enabled models
 		if (matchesKey(data, Key.alt("up")) || matchesKey(data, Key.alt("down"))) {
-			if (this.enabledIds === null) return;
 			const item = this.filteredItems[this.selectedIndex];
 			if (item && isEnabled(this.enabledIds, item.fullId)) {
 				const delta = matchesKey(data, Key.alt("up")) ? -1 : 1;
-				const currentIndex = this.enabledIds.indexOf(item.fullId);
+				const enabledList = this.enabledIds ?? this.allIds;
+				const currentIndex = enabledList.indexOf(item.fullId);
 				const newIndex = currentIndex + delta;
 				// Only move if within bounds
-				if (newIndex >= 0 && newIndex < this.enabledIds.length) {
-					this.enabledIds = move(this.enabledIds, item.fullId, delta);
+				if (newIndex >= 0 && newIndex < enabledList.length) {
+					this.enabledIds = move(this.enabledIds, this.allIds, item.fullId, delta);
 					this.isDirty = true;
 					this.selectedIndex += delta;
 					this.refresh();
-					this.notifyChange();
 				}
 			}
 			return;
@@ -263,8 +269,8 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			if (item) {
 				this.enabledIds = toggle(this.enabledIds, item.fullId);
 				this.isDirty = true;
-				this.refresh();
 				this.notifyChange();
+				this.refresh();
 			}
 			return;
 		}
@@ -274,8 +280,8 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
 			this.enabledIds = enableAll(this.enabledIds, this.allIds, targetIds);
 			this.isDirty = true;
-			this.refresh();
 			this.notifyChange();
+			this.refresh();
 			return;
 		}
 
@@ -284,8 +290,8 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
 			this.enabledIds = clearAll(this.enabledIds, this.allIds, targetIds);
 			this.isDirty = true;
-			this.refresh();
 			this.notifyChange();
+			this.refresh();
 			return;
 		}
 
@@ -300,15 +306,15 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 					? clearAll(this.enabledIds, this.allIds, providerIds)
 					: enableAll(this.enabledIds, this.allIds, providerIds);
 				this.isDirty = true;
-				this.refresh();
 				this.notifyChange();
+				this.refresh();
 			}
 			return;
 		}
 
 		// Ctrl+S - Save/persist to settings
 		if (matchesKey(data, Key.ctrl("s"))) {
-			this.callbacks.onPersist(this.enabledIds === null ? null : [...this.enabledIds]);
+			this.callbacks.onPersist(this.enabledIds ?? [...this.allIds]);
 			this.isDirty = false;
 			this.footerText.setText(this.getFooterText());
 			return;

@@ -22,6 +22,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Current model provider, used for provider-specific prompt shaping. */
+	providerId?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -35,6 +37,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
+		providerId,
 	} = options;
 	const resolvedCwd = cwd ?? process.cwd();
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
@@ -128,7 +131,25 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	const useCompactPrompt = providerId === "anthropic";
+	let prompt = useCompactPrompt
+		? `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+Available tools:
+${toolsList}
+
+You may also have access to custom tools depending on the project.
+
+Guidelines:
+${guidelines}
+
+Pi docs are available locally via the read tool when needed:
+- README: ${readmePath}
+- Docs dir: ${docsPath}
+- Examples dir: ${examplesPath}
+- Only read pi docs when the user asks about pi itself, its SDK, extensions, themes, skills, prompts, TUI, keybindings, models, or packages.
+- When working on pi topics, read the relevant .md files fully and follow their cross-references before implementing.`
+		: `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 ${toolsList}
@@ -161,7 +182,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {
-		prompt += formatSkillsForPrompt(skills);
+		prompt += formatSkillsForPrompt(skills, { compact: useCompactPrompt });
 	}
 
 	// Add date and working directory last
