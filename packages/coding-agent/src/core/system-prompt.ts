@@ -24,6 +24,8 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	/** Current model provider, used for provider-specific prompt shaping. */
 	providerId?: string;
+	/** Current model base URL, used for provider/route-specific prompt shaping. */
+	providerBaseUrl?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -38,6 +40,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		providerId,
+		providerBaseUrl,
 	} = options;
 	const resolvedCwd = cwd ?? process.cwd();
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
@@ -131,24 +134,26 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	const useCompactPrompt = providerId === "anthropic";
+	const normalizedBaseUrl = (providerBaseUrl ?? "").trim().toLowerCase();
+	// Important: keep compact prompt behavior scoped to local Anthropic subscription routes only.
+	// Do not broaden this to all Anthropic traffic; external Anthropic API usage should keep the full prompt.
+	const isLocalAnthropicRoute =
+		providerId === "anthropic" &&
+		(normalizedBaseUrl.startsWith("http://localhost") ||
+			normalizedBaseUrl.startsWith("https://localhost") ||
+			normalizedBaseUrl.startsWith("http://127.0.0.1") ||
+			normalizedBaseUrl.startsWith("https://127.0.0.1") ||
+			normalizedBaseUrl.startsWith("http://[::1]") ||
+			normalizedBaseUrl.startsWith("https://[::1]"));
+	const useCompactPrompt = isLocalAnthropicRoute;
 	let prompt = useCompactPrompt
-		? `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+		? `You are an expert coding assistant.
 
-Available tools:
-${toolsList}
-
-You may also have access to custom tools depending on the project.
+You can read files, execute commands, edit code, and write files using available tools.
+Use only the provided tools and keep responses concise.
 
 Guidelines:
-${guidelines}
-
-Pi docs are available locally via the read tool when needed:
-- README: ${readmePath}
-- Docs dir: ${docsPath}
-- Examples dir: ${examplesPath}
-- Only read pi docs when the user asks about pi itself, its SDK, extensions, themes, skills, prompts, TUI, keybindings, models, or packages.
-- When working on pi topics, read the relevant .md files fully and follow their cross-references before implementing.`
+${guidelines}`
 		: `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:

@@ -914,6 +914,7 @@ export class AgentSession {
 			toolSnippets,
 			promptGuidelines,
 			providerId: this.model?.provider,
+			providerBaseUrl: this.model?.baseUrl,
 		});
 	}
 
