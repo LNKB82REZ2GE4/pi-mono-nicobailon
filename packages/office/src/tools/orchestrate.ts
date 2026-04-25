@@ -2,7 +2,6 @@
  * Main orchestration tool for LLM to invoke multi-agent coordination.
  */
 
-import { StringEnum } from "@mariozechner/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import { executeChain } from "../coordination/chain.js";
 import { executeParallel } from "../coordination/parallel.js";
@@ -99,7 +98,7 @@ const TeamConfigSchema = Type.Object({
 });
 
 export const OrchestrateParamsSchema = Type.Object({
-	mode: StringEnum(["chain", "parallel", "team"] as const, {
+	mode: Type.Union([Type.Literal("chain"), Type.Literal("parallel"), Type.Literal("team")], {
 		description: "Execution mode: chain (sequential), parallel (concurrent), or team (persistent specialists)",
 	}),
 

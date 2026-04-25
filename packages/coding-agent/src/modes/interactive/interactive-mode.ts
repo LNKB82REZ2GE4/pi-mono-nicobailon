@@ -8,9 +8,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@mariozechner/pi-ai";
+import {
+	type AssistantMessage,
+	getProviders,
+	type ImageContent,
+	type Message,
+	type Model,
+	type OAuthProviderId,
+} from "@mariozechner/pi-ai";
 import type {
 	AutocompleteItem,
+	AutocompleteProvider,
 	EditorComponent,
 	EditorTheme,
 	Keybinding,
@@ -40,16 +48,19 @@ import {
 import { spawn, spawnSync } from "child_process";
 import {
 	APP_NAME,
+	APP_TITLE,
 	getAgentDir,
 	getAuthPath,
 	getDebugLogPath,
+	getDocsPath,
 	getShareViewerUrl,
-	getUpdateInstruction,
 	VERSION,
 } from "../../config.js";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.js";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
 import type {
+	AutocompleteProviderFactory,
+	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionRunner,
 	ExtensionUIContext,
@@ -93,7 +104,7 @@ import { FooterComponent } from "./components/footer.js";
 import { keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
 import { ModelSelectorComponent } from "./components/model-selector.js";
-import { OAuthSelectorComponent } from "./components/oauth-selector.js";
+import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
@@ -150,7 +161,7 @@ type CompactionQueuedMessage = {
 };
 
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
-	"Anthropic subscription auth is active. Third-party usage now draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
+	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
@@ -175,6 +186,53 @@ function mergeUniqueModels(...modelLists: Array<ReadonlyArray<Model<any>> | unde
 		}
 	}
 	return merged;
+}
+
+const BEDROCK_PROVIDER_ID = "amazon-bedrock";
+
+const API_KEY_LOGIN_PROVIDERS: Record<string, string> = {
+	anthropic: "Anthropic",
+	[BEDROCK_PROVIDER_ID]: "Amazon Bedrock",
+	"azure-openai-responses": "Azure OpenAI Responses",
+	cerebras: "Cerebras",
+	deepseek: "DeepSeek",
+	fireworks: "Fireworks",
+	google: "Google Gemini",
+	"google-vertex": "Google Vertex AI",
+	groq: "Groq",
+	huggingface: "Hugging Face",
+	"kimi-coding": "Kimi For Coding",
+	mistral: "Mistral",
+	minimax: "MiniMax",
+	"minimax-cn": "MiniMax (China)",
+	opencode: "OpenCode Zen",
+	"opencode-go": "OpenCode Go",
+	openai: "OpenAI",
+	openrouter: "OpenRouter",
+	"vercel-ai-gateway": "Vercel AI Gateway",
+	xai: "xAI",
+	zai: "ZAI",
+};
+
+const BUILT_IN_API_KEY_LOGIN_PROVIDERS = new Set(Object.keys(API_KEY_LOGIN_PROVIDERS));
+const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
+
+export function isApiKeyLoginProvider(
+	providerId: string,
+	oauthProviderIds: ReadonlySet<string>,
+	builtInProviderIds: ReadonlySet<string> = BUILT_IN_MODEL_PROVIDERS,
+): boolean {
+	if (BUILT_IN_API_KEY_LOGIN_PROVIDERS.has(providerId)) {
+		return true;
+	}
+	if (builtInProviderIds.has(providerId)) {
+		return false;
+	}
+	return !oauthProviderIds.has(providerId);
+}
+
+export function getApiKeyProviderDisplayName(providerId: string): string {
+	return API_KEY_LOGIN_PROVIDERS[providerId] ?? providerId;
 }
 
 /**
@@ -203,7 +261,8 @@ export class InteractiveMode {
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
-	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
+	private autocompleteProvider: AutocompleteProvider | undefined;
+	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
@@ -214,7 +273,8 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private loadingAnimation: Loader | undefined = undefined;
-	private pendingWorkingMessage: string | undefined = undefined;
+	private workingMessage: string | undefined = undefined;
+	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
@@ -236,9 +296,6 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
-
-	// Track first user message to avoid leading spacer at top of chat
-	private isFirstUserMessage = true;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -320,6 +377,12 @@ export class InteractiveMode {
 		private options: InteractiveModeOptions = {},
 	) {
 		this.runtimeHost = runtimeHost;
+		this.runtimeHost.setBeforeSessionInvalidate(() => {
+			this.resetExtensionUI();
+		});
+		this.runtimeHost.setRebindSession(async () => {
+			await this.rebindCurrentSession();
+		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -400,7 +463,7 @@ export class InteractiveMode {
 			}));
 	}
 
-	private setupAutocomplete(fdPath: string | undefined): void {
+	private createBaseAutocompleteProvider(): AutocompleteProvider {
 		// Define commands for autocomplete
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 			name: command.name,
@@ -470,15 +533,23 @@ export class InteractiveMode {
 			}
 		}
 
-		// Setup autocomplete
-		this.autocompleteProvider = new CombinedAutocompleteProvider(
+		return new CombinedAutocompleteProvider(
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			this.sessionManager.getCwd(),
-			fdPath,
+			this.fdPath,
 		);
-		this.defaultEditor.setAutocompleteProvider(this.autocompleteProvider);
+	}
+
+	private setupAutocompleteProvider(): void {
+		let provider = this.createBaseAutocompleteProvider();
+		for (const wrapProvider of this.autocompleteProviderWrappers) {
+			provider = wrapProvider(provider);
+		}
+
+		this.autocompleteProvider = provider;
+		this.defaultEditor.setAutocompleteProvider(provider);
 		if (this.editor !== this.defaultEditor) {
-			this.editor.setAutocompleteProvider?.(this.autocompleteProvider);
+			this.editor.setAutocompleteProvider?.(provider);
 		}
 	}
 
@@ -607,17 +678,10 @@ export class InteractiveMode {
 		this.isInitialized = true;
 
 		// Initialize extensions first so resources are shown before messages
-		await this.bindCurrentSessionExtensions();
-		await this.syncScopedModelsFromSettings();
+		await this.rebindCurrentSession();
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
-
-		// Set terminal title
-		this.updateTerminalTitle();
-
-		// Subscribe to agent events
-		this.subscribeToAgent();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -642,9 +706,9 @@ export class InteractiveMode {
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
 		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName) {
-			this.ui.terminal.setTitle(`π - ${sessionName} - ${cwdBasename}`);
+			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
 		} else {
-			this.ui.terminal.setTitle(`π - ${cwdBasename}`);
+			this.ui.terminal.setTitle(`${APP_TITLE} - ${cwdBasename}`);
 		}
 	}
 
@@ -887,6 +951,12 @@ export class InteractiveMode {
 		return result;
 	}
 
+	private formatExtensionDisplayPath(path: string): string {
+		let result = this.formatDisplayPath(path);
+		result = result.replace(/\/index\.ts$/, "").replace(/\/index\.js$/, "");
+		return result;
+	}
+
 	private formatContextPath(p: string): string {
 		const cwd = path.resolve(this.sessionManager.getCwd());
 		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
@@ -1021,11 +1091,18 @@ export class InteractiveMode {
 
 	private getCompactExtensionLabels(extensions: Array<{ path: string; sourceInfo?: SourceInfo }>): string[] {
 		const nonPackageExtensions = extensions
-			.map((extension) => ({
-				path: extension.path,
-				sourceInfo: extension.sourceInfo,
-				segments: this.getCompactDisplayPathSegments(extension.path),
-			}))
+			.map((extension) => {
+				const segments = this.getCompactDisplayPathSegments(extension.path);
+				const lastSegment = segments[segments.length - 1];
+				if (segments.length > 1 && (lastSegment === "index.ts" || lastSegment === "index.js")) {
+					segments.pop();
+				}
+				return {
+					path: extension.path,
+					sourceInfo: extension.sourceInfo,
+					segments,
+				};
+			})
 			.filter((extension) => !this.isPackageSource(extension.sourceInfo));
 
 		return extensions.map((extension) => {
@@ -1350,8 +1427,9 @@ export class InteractiveMode {
 			if (extensions.length > 0) {
 				const groups = this.buildScopeGroups(extensions);
 				const extList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
-					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
+					formatPath: (item) => this.formatExtensionDisplayPath(item.path),
+					formatPackagePath: (item) =>
+						this.formatExtensionDisplayPath(this.getShortPath(item.path, item.sourceInfo)),
 				});
 				const extensionCompactList = formatCompactList(this.getCompactExtensionLabels(extensions));
 				addLoadedSection("Extensions", extensionCompactList, extList, "mdHeading");
@@ -1448,7 +1526,6 @@ export class InteractiveMode {
 					try {
 						const result = await this.runtimeHost.newSession(options);
 						if (!result.cancelled) {
-							await this.handleRuntimeSessionChange();
 							this.renderCurrentSessionState();
 							this.ui.requestRender();
 						}
@@ -1461,7 +1538,6 @@ export class InteractiveMode {
 					try {
 						const result = await this.runtimeHost.fork(entryId, options);
 						if (!result.cancelled) {
-							await this.handleRuntimeSessionChange();
 							this.renderCurrentSessionState();
 							this.editor.setText(result.selectedText ?? "");
 							this.showStatus("Forked to new session");
@@ -1491,9 +1567,8 @@ export class InteractiveMode {
 					void this.flushCompactionQueue({ willRetry: false });
 					return { cancelled: false };
 				},
-				switchSession: async (sessionPath) => {
-					await this.handleResumeSession(sessionPath);
-					return { cancelled: false };
+				switchSession: async (sessionPath, options) => {
+					return this.handleResumeSession(sessionPath, options);
 				},
 				reload: async () => {
 					await this.handleReloadCommand();
@@ -1511,11 +1586,11 @@ export class InteractiveMode {
 		});
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-		this.setupAutocomplete(this.fdPath);
+		this.setupAutocompleteProvider();
 
 		const extensionRunner = this.session.extensionRunner;
 		this.setupExtensionShortcuts(extensionRunner);
-		this.showLoadedResources({ force: false });
+		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();
 	}
 
@@ -1536,8 +1611,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleRuntimeSessionChange(): Promise<void> {
-		this.resetExtensionUI();
+	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.applyRuntimeSettings();
@@ -1613,7 +1687,7 @@ export class InteractiveMode {
 			newSession: async (options) => {
 				const result = await this.runtimeHost.newSession(options);
 				if (!result.cancelled) {
-					await this.handleRuntimeSessionChange();
+					await this.rebindCurrentSession();
 					this.renderCurrentSessionState();
 					this.ui.requestRender();
 				}
@@ -1642,6 +1716,43 @@ export class InteractiveMode {
 	 */
 	private setExtensionStatus(key: string, text: string | undefined): void {
 		this.footerDataProvider.setExtensionStatus(key, text);
+		this.ui.requestRender();
+	}
+
+	private getWorkingLoaderMessage(): string {
+		return this.workingMessage ?? this.defaultWorkingMessage;
+	}
+
+	private createWorkingLoader(): Loader {
+		return new Loader(
+			this.ui,
+			(spinner) => theme.fg("accent", spinner),
+			(text) => theme.fg("muted", text),
+			this.getWorkingLoaderMessage(),
+			this.workingIndicatorOptions,
+		);
+	}
+
+	private stopWorkingLoader(): void {
+		if (this.loadingAnimation) {
+			this.loadingAnimation.stop();
+			this.loadingAnimation = undefined;
+		}
+		this.statusContainer.clear();
+	}
+
+	private setWorkingVisible(visible: boolean): void {
+		this.workingVisible = visible;
+		if (!visible) {
+			this.stopWorkingLoader();
+			this.ui.requestRender();
+			return;
+		}
+		if (this.session.isStreaming && !this.loadingAnimation) {
+			this.statusContainer.clear();
+			this.loadingAnimation = this.createWorkingLoader();
+			this.statusContainer.addChild(this.loadingAnimation);
+		}
 		this.ui.requestRender();
 	}
 
@@ -1738,10 +1849,13 @@ export class InteractiveMode {
 		this.clearExtensionWidgets();
 		this.footerDataProvider.clearExtensionStatuses();
 		this.footer.invalidate();
+		this.autocompleteProviderWrappers = [];
 		this.setCustomEditorComponent(undefined);
+		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
 		this.updateTerminalTitle();
-		this.pendingWorkingMessage = undefined;
+		this.workingMessage = undefined;
+		this.workingVisible = true;
 		this.setWorkingIndicator();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
@@ -1892,19 +2006,12 @@ export class InteractiveMode {
 			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
 			setWorkingMessage: (message) => {
+				this.workingMessage = message;
 				if (this.loadingAnimation) {
-					if (message) {
-						this.loadingAnimation.setMessage(message);
-					} else {
-						this.loadingAnimation.setMessage(
-							`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`,
-						);
-					}
-				} else {
-					// Queue message for when loadingAnimation is created (handles agent_start race)
-					this.pendingWorkingMessage = message;
+					this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
 				}
 			},
+			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
 			setWorkingIndicator: (options) => this.setWorkingIndicator(options),
 			setHiddenThinkingLabel: (label) => this.setHiddenThinkingLabel(label),
 			setWidget: (key, content, options) => this.setExtensionWidget(key, content, options),
@@ -1916,6 +2023,10 @@ export class InteractiveMode {
 			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
+			addAutocompleteProvider: (factory) => {
+				this.autocompleteProviderWrappers.push(factory);
+				this.setupAutocompleteProvider();
+			},
 			setEditorComponent: (factory) => this.setCustomEditorComponent(factory),
 			get theme() {
 				return theme;
@@ -2301,7 +2412,7 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			if (this.loadingAnimation) {
+			if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.session.isBashRunning) {
 				this.session.abortBash();
@@ -2581,6 +2692,9 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(true);
+				}
 				// Restore main escape handler if retry handler is still active
 				// (retry success event fires later, but we need main handler now)
 				if (this.retryEscapeHandler) {
@@ -2595,24 +2709,10 @@ export class InteractiveMode {
 					this.retryLoader.stop();
 					this.retryLoader = undefined;
 				}
-				if (this.loadingAnimation) {
-					this.loadingAnimation.stop();
-				}
-				this.statusContainer.clear();
-				this.loadingAnimation = new Loader(
-					this.ui,
-					(spinner) => theme.fg("accent", spinner),
-					(text) => theme.fg("muted", text),
-					this.defaultWorkingMessage,
-					this.workingIndicatorOptions,
-				);
-				this.statusContainer.addChild(this.loadingAnimation);
-				// Apply any pending working message queued before loader existed
-				if (this.pendingWorkingMessage !== undefined) {
-					if (this.pendingWorkingMessage) {
-						this.loadingAnimation.setMessage(this.pendingWorkingMessage);
-					}
-					this.pendingWorkingMessage = undefined;
+				this.stopWorkingLoader();
+				if (this.workingVisible) {
+					this.loadingAnimation = this.createWorkingLoader();
+					this.statusContainer.addChild(this.loadingAnimation);
 				}
 				this.ui.requestRender();
 				break;
@@ -2762,6 +2862,9 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(false);
+				}
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
@@ -2780,6 +2883,9 @@ export class InteractiveMode {
 				break;
 
 			case "compaction_start": {
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(true);
+				}
 				// Keep editor active; submissions are queued during compaction.
 				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
@@ -2803,6 +2909,9 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(false);
+				}
 				if (this.autoCompactionEscapeHandler) {
 					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
 					this.autoCompactionEscapeHandler = undefined;
@@ -2978,7 +3087,7 @@ export class InteractiveMode {
 			case "user": {
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
-					if (!this.isFirstUserMessage) {
+					if (this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
 					}
 					const skillBlock = parseSkillBlock(textContent);
@@ -3002,7 +3111,6 @@ export class InteractiveMode {
 						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
 						this.chatContainer.addChild(userComponent);
 					}
-					this.isFirstUserMessage = false;
 					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
 					}
@@ -3040,7 +3148,6 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
-		this.isFirstUserMessage = true;
 
 		if (options.updateFooter) {
 			this.footer.invalidate();
@@ -3156,7 +3263,8 @@ export class InteractiveMode {
 
 	/**
 	 * Gracefully shutdown the agent.
-	 * Emits shutdown event to extensions, then exits.
+	 * Stops the TUI before emitting shutdown events so extension UI cleanup cannot
+	 * repaint the final frame while the process is exiting.
 	 */
 	private isShuttingDown = false;
 
@@ -3164,17 +3272,13 @@ export class InteractiveMode {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
-		await this.runtimeHost.dispose();
-
-		// Wait for any pending renders to complete
-		// requestRender() uses process.nextTick(), so we wait one tick
-		await new Promise((resolve) => process.nextTick(resolve));
 
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
+		await this.runtimeHost.dispose();
 		process.exit(0);
 	}
 
@@ -3434,8 +3538,8 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const action = theme.fg("accent", getUpdateInstruction("@mariozechner/pi-coding-agent"));
-		const updateInstruction = theme.fg("muted", `New version ${newVersion} is available. `) + action;
+		const action = theme.fg("accent", `${APP_NAME} update`);
+		const updateInstruction = theme.fg("muted", `New version ${newVersion} is available. Run `) + action;
 		const changelogUrl = theme.fg(
 			"accent",
 			"https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/CHANGELOG.md",
@@ -3701,6 +3805,7 @@ export class InteractiveMode {
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
+					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -3731,7 +3836,7 @@ export class InteractiveMode {
 					},
 					onEnableSkillCommandsChange: (enabled) => {
 						this.settingsManager.setEnableSkillCommands(enabled);
-						this.setupAutocomplete(this.fdPath);
+						this.setupAutocompleteProvider();
 					},
 					onSteeringModeChange: (mode) => {
 						this.session.setSteeringMode(mode);
@@ -3810,6 +3915,9 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
+					},
+					onShowTerminalProgressChange: (enabled) => {
+						this.settingsManager.setShowTerminalProgress(enabled);
 					},
 					onCancel: () => {
 						done();
@@ -4074,7 +4182,6 @@ export class InteractiveMode {
 							return;
 						}
 
-						await this.handleRuntimeSessionChange();
 						this.renderCurrentSessionState();
 						this.editor.setText(result.selectedText ?? "");
 						done();
@@ -4108,7 +4215,6 @@ export class InteractiveMode {
 				return;
 			}
 
-			await this.handleRuntimeSessionChange();
 			this.renderCurrentSessionState();
 			this.editor.setText("");
 			this.showStatus("Cloned to new session");
@@ -4281,76 +4387,195 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleResumeSession(sessionPath: string): Promise<void> {
+	private async handleResumeSession(
+		sessionPath: string,
+		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
+	): Promise<{ cancelled: boolean }> {
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
 		try {
-			const result = await this.runtimeHost.switchSession(sessionPath);
+			const result = await this.runtimeHost.switchSession(sessionPath, {
+				withSession: options?.withSession,
+			});
 			if (result.cancelled) {
-				return;
+				return result;
 			}
-			await this.handleRuntimeSessionChange();
 			this.renderCurrentSessionState();
 			this.showStatus("Resumed session");
+			return result;
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {
 					this.showStatus("Resume cancelled");
-					return;
+					return { cancelled: true };
 				}
-				const result = await this.runtimeHost.switchSession(sessionPath, selectedCwd);
+				const result = await this.runtimeHost.switchSession(sessionPath, {
+					cwdOverride: selectedCwd,
+					withSession: options?.withSession,
+				});
 				if (result.cancelled) {
-					return;
+					return result;
 				}
-				await this.handleRuntimeSessionChange();
 				this.renderCurrentSessionState();
 				this.showStatus("Resumed session in current cwd");
-				return;
+				return result;
 			}
-			await this.handleFatalRuntimeError("Failed to resume session", error);
+			return this.handleFatalRuntimeError("Failed to resume session", error);
 		}
 	}
 
-	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
-		if (mode === "logout") {
-			const providers = this.session.modelRegistry.authStorage.list();
-			const loggedInProviders = providers.filter(
-				(p) => this.session.modelRegistry.authStorage.get(p)?.type === "oauth",
-			);
-			if (loggedInProviders.length === 0) {
-				this.showStatus("No OAuth providers logged in. Use /login first.");
-				return;
+	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const oauthProviders = authStorage.getOAuthProviders();
+		const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
+		const options: AuthSelectorProvider[] = oauthProviders.map((provider) => ({
+			id: provider.id,
+			name: provider.name,
+			authType: "oauth",
+		}));
+
+		const modelProviders = new Set(this.session.modelRegistry.getAll().map((model) => model.provider));
+		for (const providerId of modelProviders) {
+			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
+				continue;
 			}
+			options.push({
+				id: providerId,
+				name: getApiKeyProviderDisplayName(providerId),
+				authType: "api_key",
+			});
+		}
+
+		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
+		return filteredOptions.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private getLogoutProviderOptions(): AuthSelectorProvider[] {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const oauthNameById = new Map(authStorage.getOAuthProviders().map((provider) => [provider.id, provider.name]));
+		const options: AuthSelectorProvider[] = [];
+
+		for (const providerId of authStorage.list()) {
+			const credential = authStorage.get(providerId);
+			if (!credential) {
+				continue;
+			}
+			options.push({
+				id: providerId,
+				name:
+					credential.type === "oauth"
+						? (oauthNameById.get(providerId) ?? providerId)
+						: getApiKeyProviderDisplayName(providerId),
+				authType: credential.type,
+			});
+		}
+
+		return options.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private showLoginAuthTypeSelector(): void {
+		const subscriptionLabel = "Use a subscription";
+		const apiKeyLabel = "Use an API key";
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select authentication method:",
+				[subscriptionLabel, apiKeyLabel],
+				(option) => {
+					done();
+					const authType = option === subscriptionLabel ? "oauth" : "api_key";
+					this.showLoginProviderSelector(authType);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showLoginProviderSelector(authType: "oauth" | "api_key"): void {
+		const providerOptions = this.getLoginProviderOptions(authType);
+		if (providerOptions.length === 0) {
+			this.showStatus(
+				authType === "oauth" ? "No subscription providers available." : "No API key providers available.",
+			);
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new OAuthSelectorComponent(
+				"login",
+				this.session.modelRegistry.authStorage,
+				providerOptions,
+				async (providerId: string) => {
+					done();
+
+					const providerOption = providerOptions.find((provider) => provider.id === providerId);
+					if (!providerOption) {
+						return;
+					}
+
+					if (providerOption.authType === "oauth") {
+						await this.showLoginDialog(providerOption.id, providerOption.name);
+					} else if (providerOption.id === BEDROCK_PROVIDER_ID) {
+						this.showBedrockSetupDialog(providerOption.id, providerOption.name);
+					} else {
+						await this.showApiKeyLoginDialog(providerOption.id, providerOption.name);
+					}
+				},
+				() => {
+					done();
+					this.showLoginAuthTypeSelector();
+				},
+				(providerId) => this.session.modelRegistry.getProviderAuthStatus(providerId),
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
+		if (mode === "login") {
+			this.showLoginAuthTypeSelector();
+			return;
+		}
+
+		const providerOptions = this.getLogoutProviderOptions();
+		if (providerOptions.length === 0) {
+			this.showStatus(
+				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
+			);
+			return;
 		}
 
 		this.showSelector((done) => {
 			const selector = new OAuthSelectorComponent(
 				mode,
 				this.session.modelRegistry.authStorage,
+				providerOptions,
 				async (providerId: string) => {
 					done();
 
-					if (mode === "login") {
-						await this.showLoginDialog(providerId);
-					} else {
-						// Logout flow
-						const providerInfo = this.session.modelRegistry.authStorage
-							.getOAuthProviders()
-							.find((p) => p.id === providerId);
-						const providerName = providerInfo?.name || providerId;
+					const providerOption = providerOptions.find((provider) => provider.id === providerId);
+					if (!providerOption) {
+						return;
+					}
 
-						try {
-							this.session.modelRegistry.authStorage.logout(providerId);
-							this.session.modelRegistry.refresh();
-							await this.updateAvailableProviderCount();
-							this.showStatus(`Logged out of ${providerName}`);
-						} catch (error: unknown) {
-							this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
-						}
+					try {
+						this.session.modelRegistry.authStorage.logout(providerOption.id);
+						this.session.modelRegistry.refresh();
+						await this.updateAvailableProviderCount();
+						const message =
+							providerOption.authType === "oauth"
+								? `Logged out of ${providerOption.name}`
+								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+						this.showStatus(message);
+					} catch (error: unknown) {
+						this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 					}
 				},
 				() => {
@@ -4362,18 +4587,148 @@ export class InteractiveMode {
 		});
 	}
 
-	private async showLoginDialog(providerId: string): Promise<void> {
-		const providerInfo = this.session.modelRegistry.authStorage.getOAuthProviders().find((p) => p.id === providerId);
-		const providerName = providerInfo?.name || providerId;
+	private async completeProviderAuthentication(
+		providerId: string,
+		providerName: string,
+		authType: "oauth" | "api_key",
+		previousModel: Model<any> | undefined,
+	): Promise<void> {
+		this.session.modelRegistry.refresh();
+
+		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
+
+		let selectedModel: Model<any> | undefined;
+		let selectionError: string | undefined;
+		if (isUnknownModel(previousModel)) {
+			const availableModels = this.session.modelRegistry.getAvailable();
+			const providerModels = availableModels.filter((model) => model.provider === providerId);
+			if (!hasDefaultModelProvider(providerId)) {
+				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
+			} else if (providerModels.length === 0) {
+				selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
+			} else {
+				const defaultModelId = defaultModelPerProvider[providerId];
+				selectedModel = providerModels.find((model) => model.id === defaultModelId);
+				if (!selectedModel) {
+					selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
+				} else {
+					try {
+						await this.session.setModel(selectedModel);
+					} catch (error: unknown) {
+						selectedModel = undefined;
+						const errorMessage = error instanceof Error ? error.message : String(error);
+						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
+					}
+				}
+			}
+		}
+
+		await this.updateAvailableProviderCount();
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+		if (selectedModel) {
+			this.showStatus(`${actionLabel}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`);
+			void this.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
+			this.checkDaxnutsEasterEgg(selectedModel);
+		} else {
+			this.showStatus(`${actionLabel}. Credentials saved to ${getAuthPath()}`);
+			if (selectionError) {
+				this.showError(selectionError);
+			} else {
+				void this.maybeWarnAboutAnthropicSubscriptionAuth();
+			}
+		}
+	}
+
+	private showBedrockSetupDialog(providerId: string, providerName: string): void {
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		const dialog = new LoginDialogComponent(
+			this.ui,
+			providerId,
+			() => restoreEditor(),
+			providerName,
+			"Amazon Bedrock setup",
+		);
+		dialog.showInfo([
+			theme.fg("text", "Amazon Bedrock uses AWS credentials instead of a single API key."),
+			theme.fg("text", "Configure an AWS profile, IAM keys, bearer token, or role-based credentials."),
+			theme.fg("muted", "See:"),
+			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
+		]);
+
+		this.editorContainer.clear();
+		this.editorContainer.addChild(dialog);
+		this.ui.setFocus(dialog);
+		this.ui.requestRender();
+	}
+
+	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
+		const previousModel = this.session.model;
+
+		const dialog = new LoginDialogComponent(
+			this.ui,
+			providerId,
+			(_success, _message) => {
+				// Completion handled below
+			},
+			providerName,
+		);
+
+		this.editorContainer.clear();
+		this.editorContainer.addChild(dialog);
+		this.ui.setFocus(dialog);
+		this.ui.requestRender();
+
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		try {
+			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
+			if (!apiKey) {
+				throw new Error("API key cannot be empty.");
+			}
+
+			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+
+			restoreEditor();
+			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
+		} catch (error: unknown) {
+			restoreEditor();
+			const errorMsg = error instanceof Error ? error.message : String(error);
+			if (errorMsg !== "Login cancelled") {
+				this.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
+			}
+		}
+	}
+
+	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
+		const providerInfo = this.session.modelRegistry.authStorage
+			.getOAuthProviders()
+			.find((provider) => provider.id === providerId);
 		const previousModel = this.session.model;
 
 		// Providers that use callback servers (can paste redirect URL)
 		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
 
 		// Create login dialog component
-		const dialog = new LoginDialogComponent(this.ui, providerId, (_success, _message) => {
-			// Completion handled below
-		});
+		const dialog = new LoginDialogComponent(
+			this.ui,
+			providerId,
+			(_success, _message) => {
+				// Completion handled below
+			},
+			providerName,
+		);
 
 		// Show dialog in editor container
 		this.editorContainer.clear();
@@ -4440,51 +4795,7 @@ export class InteractiveMode {
 
 			// Success
 			restoreEditor();
-			this.session.modelRegistry.refresh();
-
-			let selectedModel: Model<any> | undefined;
-			let selectionError: string | undefined;
-			if (isUnknownModel(previousModel)) {
-				const availableModels = this.session.modelRegistry.getAvailable();
-				const providerModels = availableModels.filter((model) => model.provider === providerId);
-				if (!hasDefaultModelProvider(providerId)) {
-					selectionError = `Logged in to ${providerName}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
-				} else if (providerModels.length === 0) {
-					selectionError = `Logged in to ${providerName}, but no models are available for that provider. Use /model to select a model.`;
-				} else {
-					const defaultModelId = defaultModelPerProvider[providerId];
-					selectedModel = providerModels.find((model) => model.id === defaultModelId);
-					if (!selectedModel) {
-						selectionError = `Logged in to ${providerName}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
-					} else {
-						try {
-							await this.session.setModel(selectedModel);
-						} catch (error: unknown) {
-							selectedModel = undefined;
-							const errorMessage = error instanceof Error ? error.message : String(error);
-							selectionError = `Logged in to ${providerName}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
-						}
-					}
-				}
-			}
-
-			await this.updateAvailableProviderCount();
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
-			if (selectedModel) {
-				this.showStatus(
-					`Logged in to ${providerName}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`,
-				);
-				void this.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
-				this.checkDaxnutsEasterEgg(selectedModel);
-			} else {
-				this.showStatus(`Logged in to ${providerName}. Credentials saved to ${getAuthPath()}`);
-				if (selectionError) {
-					this.showError(selectionError);
-				} else {
-					void this.maybeWarnAboutAnthropicSubscriptionAuth();
-				}
-			}
+			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
 		} catch (error: unknown) {
 			restoreEditor();
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -4558,8 +4869,7 @@ export class InteractiveMode {
 			}
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
-			this.setupAutocomplete(this.fdPath);
-			await this.syncScopedModelsFromSettings();
+			this.setupAutocompleteProvider();
 			const runner = this.session.extensionRunner;
 			this.setupExtensionShortcuts(runner);
 			this.rebuildChatFromMessages();
@@ -4648,7 +4958,6 @@ export class InteractiveMode {
 				this.showStatus("Import cancelled");
 				return;
 			}
-			await this.handleRuntimeSessionChange();
 			this.renderCurrentSessionState();
 			this.showStatus(`Session imported from: ${inputPath}`);
 		} catch (error: unknown) {
@@ -4663,7 +4972,6 @@ export class InteractiveMode {
 					this.showStatus("Import cancelled");
 					return;
 				}
-				await this.handleRuntimeSessionChange();
 				this.renderCurrentSessionState();
 				this.showStatus(`Session imported from: ${inputPath}`);
 				return;
@@ -5019,7 +5327,6 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return;
 			}
-			await this.handleRuntimeSessionChange();
 			this.renderCurrentSessionState();
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
@@ -5197,6 +5504,9 @@ export class InteractiveMode {
 
 	stop(): void {
 		this.unregisterSignalHandlers();
+		if (this.settingsManager.getShowTerminalProgress()) {
+			this.ui.terminal.setProgress(false);
+		}
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
